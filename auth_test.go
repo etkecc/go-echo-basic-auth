@@ -12,6 +12,13 @@ func TestNewValidator(t *testing.T) {
 	}
 }
 
+func TestNewValidator_NoArgs(t *testing.T) {
+	validator := NewValidator()
+	if validator != nil {
+		t.Error("NewValidator() should return nil")
+	}
+}
+
 func TestNewValidator_Nil(t *testing.T) {
 	validator := NewValidator(nil)
 	if validator != nil {
