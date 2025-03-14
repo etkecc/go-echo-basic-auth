@@ -51,5 +51,5 @@ func NewMiddleware(auths ...*Auth) echo.MiddlewareFunc {
 func Equals(str1, str2 string) bool {
 	b1 := []byte(str1)
 	b2 := []byte(str2)
-	return subtle.ConstantTimeEq(int32(len(b1)), int32(len(b2))) == 1 && subtle.ConstantTimeCompare(b1, b2) == 1
+	return subtle.ConstantTimeEq(int32(len(b1)), int32(len(b2))) == 1 && subtle.ConstantTimeCompare(b1, b2) == 1 //nolint:gosec // integer overflow is not expected
 }
