@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"net"
 	"slices"
+	"strings"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -13,7 +14,7 @@ import (
 type Auth struct {
 	Login    string   `json:"login" yaml:"login"`       // Basic auth login
 	Password string   `json:"password" yaml:"password"` // Basic auth password
-	IPs      []string `json:"ips" yaml:"ips"`           // Allowed IPs
+	IPs      []string `json:"ips" yaml:"ips"`           // Allowed IPs and CIDRs
 }
 
 // ContextLoginKey is the key used to store the login after successful auth in the context
@@ -27,16 +28,18 @@ func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 	validIPs, validCIDRs := parseIPs(auths...)
 
 	return func(login, password string, c echo.Context) (bool, error) {
+		sanitizedPath := strings.ReplaceAll(c.Request().URL.Path, "\n", "")
+		sanitizedPath = strings.ReplaceAll(sanitizedPath, "\r", "")
 		for idx, auth := range auths {
 			allowedIP := isIPAllowed(validIPs[idx], validCIDRs[idx], c.RealIP())
 			match := Equals(auth.Login, login) && Equals(auth.Password, password)
 			if match && allowedIP {
 				c.Set(ContextLoginKey, login)
-				c.Logger().Infof("authorization attempt from %s to %s (allowed_ip=%t allowed_credentials=%t)", c.RealIP(), c.Request().URL.Path, allowedIP, match)
+				c.Logger().Infof("authorization attempt from %s to %s (allowed_ip==%t and allowed_credentials==%t)", c.RealIP(), sanitizedPath, allowedIP, match)
 				return true, nil
 			}
 		}
-		c.Logger().Infof("authorization attempt from %s to %s (allowed_ip=%t allowed_credentials=%t)", c.RealIP(), c.Request().URL.Path, false, false)
+		c.Logger().Infof("authorization attempt from %s to %s (allowed_ip==%t or allowed_credentials==%t)", c.RealIP(), sanitizedPath, false, false)
 
 		return false, nil
 	}
