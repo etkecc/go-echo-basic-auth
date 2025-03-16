@@ -19,42 +19,6 @@ type Auth struct {
 // ContextLoginKey is the key used to store the login after successful auth in the context
 const ContextLoginKey = "echo-basic-auth.login"
 
-func isIPAllowed(validIPs []string, validCIDRs []*net.IPNet, ip string) bool {
-	allowedIP := true
-	if len(validIPs) != 0 {
-		allowedIP = slices.Contains(validIPs, ip)
-	}
-	if len(validCIDRs) != 0 {
-		ip := net.ParseIP(ip)
-		for _, ipnet := range validCIDRs {
-			if ipnet.Contains(ip) {
-				allowedIP = true
-				break
-			}
-		}
-	}
-
-	return allowedIP
-}
-
-func parseIPs(auths ...*Auth) (validIPs map[int][]string, validCIDRs map[int][]*net.IPNet) {
-	validIPs = map[int][]string{}
-	validCIDRs = map[int][]*net.IPNet{}
-
-	for idx, auth := range auths {
-		validIPs[idx] = []string{}
-		validCIDRs[idx] = []*net.IPNet{}
-		for _, ip := range auth.IPs {
-			if _, ipnet, err := net.ParseCIDR(ip); err == nil {
-				validCIDRs[idx] = append(validCIDRs[idx], ipnet)
-			} else {
-				validIPs[idx] = append(validIPs[idx], ip)
-			}
-		}
-	}
-	return validIPs, validCIDRs
-}
-
 // NewValidator returns a new BasicAuthValidator
 func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 	if len(auths) == 0 || auths[0] == nil {
@@ -88,4 +52,42 @@ func Equals(str1, str2 string) bool {
 	b1 := []byte(str1)
 	b2 := []byte(str2)
 	return subtle.ConstantTimeEq(int32(len(b1)), int32(len(b2))) == 1 && subtle.ConstantTimeCompare(b1, b2) == 1 //nolint:gosec // integer overflow is not expected
+}
+
+// parseIPs parses the IPs and CIDRs
+func parseIPs(auths ...*Auth) (validIPs map[int][]string, validCIDRs map[int][]*net.IPNet) {
+	validIPs = map[int][]string{}
+	validCIDRs = map[int][]*net.IPNet{}
+
+	for idx, auth := range auths {
+		validIPs[idx] = []string{}
+		validCIDRs[idx] = []*net.IPNet{}
+		for _, ip := range auth.IPs {
+			if _, ipnet, err := net.ParseCIDR(ip); err == nil {
+				validCIDRs[idx] = append(validCIDRs[idx], ipnet)
+			} else {
+				validIPs[idx] = append(validIPs[idx], ip)
+			}
+		}
+	}
+	return validIPs, validCIDRs
+}
+
+// isIPAllowed checks if the IP is allowed
+func isIPAllowed(validIPs []string, validCIDRs []*net.IPNet, ip string) bool {
+	allowedIP := true
+	if len(validIPs) != 0 {
+		allowedIP = slices.Contains(validIPs, ip)
+	}
+	if len(validCIDRs) != 0 {
+		ip := net.ParseIP(ip)
+		for _, ipnet := range validCIDRs {
+			if ipnet.Contains(ip) {
+				allowedIP = true
+				break
+			}
+		}
+	}
+
+	return allowedIP
 }
