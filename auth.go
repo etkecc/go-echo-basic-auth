@@ -2,6 +2,7 @@ package echobasicauth
 
 import (
 	"crypto/subtle"
+	"net"
 	"slices"
 
 	"github.com/labstack/echo/v4"
@@ -18,17 +19,52 @@ type Auth struct {
 // ContextLoginKey is the key used to store the login after successful auth in the context
 const ContextLoginKey = "echo-basic-auth.login"
 
+func isIPAllowed(validIPs []string, validCIDRs []*net.IPNet, ip string) bool {
+	allowedIP := true
+	if len(validIPs) != 0 {
+		allowedIP = slices.Contains(validIPs, ip)
+	}
+	if len(validCIDRs) != 0 {
+		ip := net.ParseIP(ip)
+		for _, ipnet := range validCIDRs {
+			if ipnet.Contains(ip) {
+				allowedIP = true
+				break
+			}
+		}
+	}
+
+	return allowedIP
+}
+
+func parseIPs(auths ...*Auth) (validIPs map[int][]string, validCIDRs map[int][]*net.IPNet) {
+	validIPs = map[int][]string{}
+	validCIDRs = map[int][]*net.IPNet{}
+
+	for idx, auth := range auths {
+		validIPs[idx] = []string{}
+		validCIDRs[idx] = []*net.IPNet{}
+		for _, ip := range auth.IPs {
+			if _, ipnet, err := net.ParseCIDR(ip); err == nil {
+				validCIDRs[idx] = append(validCIDRs[idx], ipnet)
+			} else {
+				validIPs[idx] = append(validIPs[idx], ip)
+			}
+		}
+	}
+	return validIPs, validCIDRs
+}
+
 // NewValidator returns a new BasicAuthValidator
 func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 	if len(auths) == 0 || auths[0] == nil {
 		return nil
 	}
+	validIPs, validCIDRs := parseIPs(auths...)
+
 	return func(login, password string, c echo.Context) (bool, error) {
-		for _, auth := range auths {
-			allowedIP := true
-			if len(auth.IPs) != 0 {
-				allowedIP = slices.Contains(auth.IPs, c.RealIP())
-			}
+		for idx, auth := range auths {
+			allowedIP := isIPAllowed(validIPs[idx], validCIDRs[idx], c.RealIP())
 			match := Equals(auth.Login, login) && Equals(auth.Password, password)
 			if match && allowedIP {
 				c.Set(ContextLoginKey, login)
