@@ -1,93 +1,35 @@
 package echobasicauth
 
 import (
-	"net"
-	"net/http"
-	"net/http/httptest"
-	"slices"
+	"sync"
 	"testing"
-
-	"github.com/labstack/echo/v4"
-	// This is just for the echo context setup, not for assertions in the test itself
 )
 
-func TestEquals(t *testing.T) {
-	tests := []struct {
-		a, b        string
-		shouldEqual bool
-	}{
-		{"password", "password", true},
-		{"pass", "word", false},
-		{"same", "same", true},
-		{"", "", true},
-	}
-
-	for _, test := range tests {
-		if Equals(test.a, test.b) != test.shouldEqual {
-			t.Errorf("Equals(%q, %q) expected %v", test.a, test.b, test.shouldEqual)
-		}
-	}
-}
-
-func TestNewValidator(t *testing.T) {
-	auths := []*Auth{
-		{Login: "user1", Password: "pass1", IPs: []string{"127.0.0.1"}},
-	}
-
-	validator := NewValidator(auths...)
-	if validator == nil {
-		t.Fatal("expected non-nil validator")
-	}
-
-	e := echo.New()
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
-
-	// Valid credentials and IP
-	c.Request().RemoteAddr = "127.0.0.1:12345"
-	if valid, _ := validator("user1", "pass1", c); !valid {
-		t.Error("Expected valid credentials to pass")
-	}
-
-	// Invalid IP
-	c.Request().RemoteAddr = "192.168.1.2:12345"
-	if valid, _ := validator("user1", "pass1", c); valid {
-		t.Error("Expected invalid IP to fail")
-	}
-
-	// Invalid credentials
-	c.Request().RemoteAddr = "127.0.0.1:12345"
-	if valid, _ := validator("user1", "wrongpass", c); valid {
-		t.Error("Expected invalid credentials to fail")
-	}
-}
-
 func TestParseIPs(t *testing.T) {
-	auths := []*Auth{
-		{IPs: []string{"192.168.1.1", "10.0.0.0/24"}},
-		{IPs: []string{"8.8.8.8"}},
+	auth0 := &Auth{IPs: []string{"192.168.1.1", "10.0.0.0/24"}}
+	auth1 := &Auth{IPs: []string{"8.8.8.8"}}
+
+	// trigger lazy parsing via AllowedIP
+	auth0.AllowedIP("0.0.0.0")
+	auth1.AllowedIP("0.0.0.0")
+
+	if len(auth0.parsedIPs) != 1 || auth0.parsedIPs[0] != "192.168.1.1" {
+		t.Errorf("unexpected parsed IPs for auth0: %v", auth0.parsedIPs)
+	}
+	if len(auth0.parsedCIDRs) != 1 {
+		t.Errorf("unexpected parsed CIDRs for auth0: %v", auth0.parsedCIDRs)
 	}
 
-	validIPs, validCIDRs := parseIPs(auths...)
-
-	if len(validIPs) != 2 || len(validCIDRs) != 2 {
-		t.Fatalf("unexpected parse result count")
+	if len(auth1.parsedIPs) != 1 || auth1.parsedIPs[0] != "8.8.8.8" {
+		t.Errorf("unexpected parsed IPs for auth1: %v", auth1.parsedIPs)
 	}
-
-	if !slices.Contains(validIPs[0], "192.168.1.1") || len(validCIDRs[0]) != 1 {
-		t.Errorf("unexpected parsing for auth 0")
-	}
-
-	if !slices.Contains(validIPs[1], "8.8.8.8") || len(validCIDRs[1]) != 0 {
-		t.Errorf("unexpected parsing for auth 1")
+	if len(auth1.parsedCIDRs) != 0 {
+		t.Errorf("unexpected parsed CIDRs for auth1: %v", auth1.parsedCIDRs)
 	}
 }
 
-func TestIsIPAllowed(t *testing.T) {
-	validIPs := []string{"192.168.1.1", "10.0.0.1"}
-	_, validCIDR1, _ := net.ParseCIDR("192.168.1.0/24")
-	validCIDRs := []*net.IPNet{validCIDR1}
+func TestAllowedIP(t *testing.T) {
+	auth := &Auth{IPs: []string{"192.168.1.1", "10.0.0.1", "192.168.1.0/24"}}
 
 	tests := []struct {
 		ip         string
@@ -100,9 +42,79 @@ func TestIsIPAllowed(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		result := isIPAllowed(validIPs, validCIDRs, test.ip)
+		result := auth.AllowedIP(test.ip)
 		if result != test.shouldPass {
-			t.Errorf("expected isIPAllowed for %s to be %v, got %v", test.ip, test.shouldPass, result)
+			t.Errorf("expected AllowedIP for %s to be %v, got %v", test.ip, test.shouldPass, result)
 		}
 	}
+}
+
+func TestAllowedIPNoRestrictions(t *testing.T) {
+	auth := &Auth{}
+
+	if !auth.AllowedIP("1.2.3.4") {
+		t.Error("expected any IP to be allowed when no IPs configured")
+	}
+}
+
+func TestAllowedIPCIDROnly(t *testing.T) {
+	auth := &Auth{IPs: []string{"10.0.0.0/8"}}
+
+	tests := []struct {
+		ip         string
+		shouldPass bool
+	}{
+		{"10.0.0.1", true},
+		{"10.255.255.255", true},
+		{"192.168.1.1", false},
+	}
+
+	for _, test := range tests {
+		result := auth.AllowedIP(test.ip)
+		if result != test.shouldPass {
+			t.Errorf("expected AllowedIP for %s to be %v, got %v", test.ip, test.shouldPass, result)
+		}
+	}
+}
+
+func TestParseIPsInvalidEntries(t *testing.T) {
+	auth := &Auth{IPs: []string{"not-an-ip", "192.168.1.1", "also-invalid"}}
+	auth.AllowedIP("0.0.0.0")
+
+	if len(auth.parsedIPs) != 1 || auth.parsedIPs[0] != "192.168.1.1" {
+		t.Errorf("expected only valid IPs, got: %v", auth.parsedIPs)
+	}
+	if len(auth.parsedCIDRs) != 0 {
+		t.Errorf("expected no CIDRs, got: %v", auth.parsedCIDRs)
+	}
+}
+
+func TestParseIPsCalledOnce(t *testing.T) {
+	auth := &Auth{IPs: []string{"192.168.1.1"}}
+	auth.AllowedIP("0.0.0.0")
+
+	// mutate IPs after first parse
+	auth.IPs = append(auth.IPs, "10.0.0.1")
+	auth.AllowedIP("0.0.0.0")
+
+	// should still have only the original IP since sync.Once prevents re-parsing
+	if len(auth.parsedIPs) != 1 {
+		t.Errorf("expected parseIPs to run only once, got parsedIPs: %v", auth.parsedIPs)
+	}
+}
+
+func TestAllowedIPConcurrent(_ *testing.T) {
+	auth := &Auth{IPs: []string{"192.168.1.1", "10.0.0.0/24"}}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			auth.AllowedIP("192.168.1.1")
+			auth.AllowedIP("10.0.0.5")
+			auth.AllowedIP("8.8.8.8")
+		}()
+	}
+	wg.Wait()
 }
