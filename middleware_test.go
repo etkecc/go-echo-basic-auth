@@ -118,3 +118,23 @@ func TestNewValidator(t *testing.T) {
 		t.Error("Expected invalid credentials to fail")
 	}
 }
+
+func TestNewValidatorEmptyConfiguredCredsNeverMatch(t *testing.T) {
+	// Empty configured creds must reject even empty presented creds, else a dropped secret degrades to IP-only auth.
+	validator := NewValidator(&Auth{Login: "", Password: ""})
+	if validator == nil {
+		t.Fatal("expected non-nil validator")
+	}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	if valid, _ := validator("", "", c); valid {
+		t.Error("empty configured creds matched empty presented creds")
+	}
+	if valid, _ := validator("anything", "anything", c); valid {
+		t.Error("empty configured creds matched presented creds")
+	}
+}
