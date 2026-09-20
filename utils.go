@@ -20,7 +20,8 @@ func anonymizeIP(ip string) string {
 	}
 	parsedIP := net.ParseIP(ip)
 	if parsedIP == nil {
-		return ip // not an ip
+		// never echo unparsed input, it would let a client write its own log lines
+		return "invalid"
 	}
 
 	// IPv4
@@ -38,5 +39,5 @@ func anonymizeIP(ip string) string {
 		ipParts[len(ipParts)-1] = "0"
 		return strings.Join(ipParts, ":")
 	}
-	return ip // not an ip
+	return parsedIP.String()
 }

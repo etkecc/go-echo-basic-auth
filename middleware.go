@@ -1,6 +1,7 @@
 package echobasicauth
 
 import (
+	"net"
 	"slices"
 	"strings"
 	"time"
@@ -12,6 +13,19 @@ import (
 // ContextLoginKey is the key used to store the login after successful auth in the context
 const ContextLoginKey = "echo-basic-auth.login"
 
+// ClientIP resolves the client address, trusting forwarded headers only when echo.IPExtractor is set
+func ClientIP(c echo.Context) string {
+	if e := c.Echo(); e != nil && e.IPExtractor != nil {
+		return c.RealIP()
+	}
+	remoteAddr := c.Request().RemoteAddr
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
 // NewValidator returns a new BasicAuthValidator
 func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 	auths = slices.DeleteFunc(auths, func(a *Auth) bool { return a == nil })
@@ -19,9 +33,10 @@ func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 		return nil
 	}
 	return func(login, password string, c echo.Context) (bool, error) {
-		var wasIPAllowed, wasAuthAllowed bool
+		ip := ClientIP(c)
+		wasIPAllowed, wasAuthAllowed := false, false
 		for _, auth := range auths {
-			allowedIP := auth.AllowedIP(c.RealIP())
+			allowedIP := auth.AllowedIP(ip)
 			if allowedIP {
 				wasIPAllowed = true
 			}
@@ -37,17 +52,17 @@ func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 			}
 		}
 
-		logAttempt(c, wasIPAllowed, wasAuthAllowed)
+		logAttempt(c, ip, wasIPAllowed, wasAuthAllowed)
 		return false, nil
 	}
 }
 
-// logAttempt logs a failed authentication attempt
-func logAttempt(c echo.Context, wasIPAllowed, wasAuthAllowed bool) {
+// logAttempt logs a failed authentication attempt at WARN, visible once the app raises the logger level
+func logAttempt(c echo.Context, ip string, wasIPAllowed, wasAuthAllowed bool) {
 	requestPath := strings.ReplaceAll(strings.ReplaceAll(c.Request().URL.Path, "\n", ""), "\r", "")
 	c.Logger().Warnf(
 		`%s - FAIL [%s] "%s %s %s" 401 0 "-" "Auth: false (ip: %t; creds: %t)"`,
-		anonymizeIP(c.RealIP()),
+		anonymizeIP(ip),
 		time.Now().Format("2/Jan/2006:15:04:05 -0700"),
 		c.Request().Method,
 		requestPath,

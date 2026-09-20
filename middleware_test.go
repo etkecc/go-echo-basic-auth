@@ -1,11 +1,14 @@
 package echobasicauth
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	gommonlog "github.com/labstack/gommon/log"
 )
 
 func TestNewValidatorNil(t *testing.T) {
@@ -136,5 +139,110 @@ func TestNewValidatorEmptyConfiguredCredsNeverMatch(t *testing.T) {
 	}
 	if valid, _ := validator("anything", "anything", c); valid {
 		t.Error("empty configured creds matched presented creds")
+	}
+}
+
+func TestNewValidatorRejectsForwardedHeaderSpoof(t *testing.T) {
+	auth := &Auth{Login: "admin", Password: "s3cr3t", IPs: []string{"10.9.9.9"}}
+
+	e := echo.New()
+	e.Use(NewMiddleware(auth))
+	e.GET("/admin", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set(echo.HeaderXForwardedFor, "10.9.9.9")
+	req.Header.Set(echo.HeaderXRealIP, "10.9.9.9")
+	req.SetBasicAuth("admin", "s3cr3t")
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected forwarded headers to be ignored, got status %d", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
+	req.RemoteAddr = "10.9.9.9:1234"
+	req.SetBasicAuth("admin", "s3cr3t")
+
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected whitelisted peer to pass, got status %d", rec.Code)
+	}
+}
+
+func TestClientIP(t *testing.T) {
+	newEcho := func(extractor echo.IPExtractor) *echo.Echo {
+		e := echo.New()
+		e.IPExtractor = extractor
+		e.GET("/", func(c echo.Context) error { return c.String(http.StatusOK, ClientIP(c)) })
+		return e
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set(echo.HeaderXForwardedFor, "10.9.9.9")
+
+	rec := httptest.NewRecorder()
+	newEcho(nil).ServeHTTP(rec, req)
+	if got := rec.Body.String(); got != "127.0.0.1" {
+		t.Errorf("expected transport peer without an extractor, got %q", got)
+	}
+
+	rec = httptest.NewRecorder()
+	newEcho(echo.ExtractIPFromXFFHeader()).ServeHTTP(rec, req)
+	if got := rec.Body.String(); got != "10.9.9.9" {
+		t.Errorf("expected configured extractor to be honored, got %q", got)
+	}
+
+	req.RemoteAddr = "not-a-peer"
+	rec = httptest.NewRecorder()
+	newEcho(nil).ServeHTTP(rec, req)
+	if got := rec.Body.String(); got != "not-a-peer" {
+		t.Errorf("expected unparseable peer to pass through, got %q", got)
+	}
+}
+
+func TestLogAttemptVisibleAtWarnLevel(t *testing.T) {
+	auth := &Auth{Login: "admin", Password: "s3cr3t"}
+
+	e := echo.New()
+	sink := &bytes.Buffer{}
+	e.Logger.SetOutput(sink)
+	e.Logger.SetLevel(gommonlog.WARN)
+	e.Use(NewMiddleware(auth))
+	e.GET("/admin", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
+	req.RemoteAddr = "203.0.113.7:1234"
+	req.SetBasicAuth("admin", "wrong")
+	e.ServeHTTP(httptest.NewRecorder(), req)
+
+	if !strings.Contains(sink.String(), "FAIL") {
+		t.Errorf("expected failed attempt to be logged at WARN level, got %q", sink.String())
+	}
+}
+
+func TestLogAttemptDropsUnparsedPeerInput(t *testing.T) {
+	auth := &Auth{Login: "admin", Password: "s3cr3t"}
+
+	e := echo.New()
+	sink := &bytes.Buffer{}
+	e.Logger.SetOutput(sink)
+	e.Logger.SetLevel(gommonlog.WARN)
+	e.Use(NewMiddleware(auth))
+	e.GET("/admin", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+
+	req := httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
+	req.RemoteAddr = "1.2.3.4 - FAIL [01/Jan/2020:00:00:00 +0000]"
+	req.SetBasicAuth("admin", "wrong")
+	e.ServeHTTP(httptest.NewRecorder(), req)
+
+	if strings.Contains(sink.String(), "01/Jan/2020") {
+		t.Errorf("expected log to drop unparsed peer input, got %q", sink.String())
+	}
+	if !strings.Contains(sink.String(), "invalid") {
+		t.Errorf("expected invalid marker instead of the raw peer, got %q", sink.String())
 	}
 }

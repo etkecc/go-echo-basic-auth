@@ -1,6 +1,7 @@
 package echobasicauth
 
 import (
+	"strings"
 	"sync"
 	"testing"
 )
@@ -89,32 +90,80 @@ func TestParseIPsInvalidEntries(t *testing.T) {
 	}
 }
 
-func TestParseIPsCalledOnce(t *testing.T) {
-	auth := &Auth{IPs: []string{"192.168.1.1"}}
-	auth.AllowedIP("0.0.0.0")
+func TestAllowedIPFollowsChangedIPs(t *testing.T) {
+	auth := &Auth{IPs: []string{"127.0.0.1"}}
+	if !auth.AllowedIP("127.0.0.1") {
+		t.Fatal("expected configured IP to be allowed")
+	}
 
-	// mutate IPs after first parse
-	auth.IPs = append(auth.IPs, "10.0.0.1")
-	auth.AllowedIP("0.0.0.0")
+	auth.IPs = []string{"10.0.0.1"}
+	if auth.AllowedIP("127.0.0.1") {
+		t.Error("expected revoked IP to be denied once IPs changed")
+	}
+	if !auth.AllowedIP("10.0.0.1") {
+		t.Error("expected added IP to be allowed once IPs changed")
+	}
+}
 
-	// should still have only the original IP since sync.Once prevents re-parsing
-	if len(auth.parsedIPs) != 1 {
-		t.Errorf("expected parseIPs to run only once, got parsedIPs: %v", auth.parsedIPs)
+func TestAllowedIPUnparseableEntriesDeny(t *testing.T) {
+	tests := []struct {
+		name string
+		ips  []string
+	}{
+		{"out of range prefix", []string{"10.0.0.0/33"}},
+		{"unsupported range syntax", []string{"10.0.0.1-10.0.0.9"}},
+		{"unsupported wildcard", []string{"10.0.0.*"}},
+		{"empty entry", []string{""}},
+	}
+
+	for _, test := range tests {
+		auth := &Auth{IPs: test.ips}
+		if auth.AllowedIP("203.0.113.7") {
+			t.Errorf("%s: expected %v to deny everyone, got an open allowlist", test.name, test.ips)
+		}
+	}
+}
+
+func TestAllowedIPValidEntryGovernsUnparseableOne(t *testing.T) {
+	auth := &Auth{IPs: []string{"10.0.0.0/8", "10.0.0.0/33"}}
+
+	if !auth.AllowedIP("10.1.2.3") {
+		t.Error("expected valid CIDR to allow its range")
+	}
+	if auth.AllowedIP("203.0.113.7") {
+		t.Error("expected outside IP to stay denied")
+	}
+}
+
+func TestValidate(t *testing.T) {
+	valid := &Auth{IPs: []string{"127.0.0.1", "10.0.0.0/24", "::1", "2001:db8::/32"}}
+	if err := valid.Validate(); err != nil {
+		t.Errorf("expected valid entries to pass, got %v", err)
+	}
+	if err := (&Auth{}).Validate(); err != nil {
+		t.Errorf("expected no entries to pass, got %v", err)
+	}
+
+	invalid := &Auth{IPs: []string{"10.0.0.0/33", "10.0.0.1-10.0.0.9"}}
+	err := invalid.Validate()
+	if err == nil {
+		t.Fatal("expected unparseable entries to be reported")
+	}
+	if !strings.Contains(err.Error(), "10.0.0.0/33") || !strings.Contains(err.Error(), "10.0.0.1-10.0.0.9") {
+		t.Errorf("expected every invalid entry in the error, got %v", err)
 	}
 }
 
 func TestAllowedIPConcurrent(_ *testing.T) {
 	auth := &Auth{IPs: []string{"192.168.1.1", "10.0.0.0/24"}}
 
-	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	wg := sync.WaitGroup{}
+	for range 100 {
+		wg.Go(func() {
 			auth.AllowedIP("192.168.1.1")
 			auth.AllowedIP("10.0.0.5")
 			auth.AllowedIP("8.8.8.8")
-		}()
+		})
 	}
 	wg.Wait()
 }

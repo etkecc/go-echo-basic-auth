@@ -26,7 +26,9 @@ func TestAnonymizeIP(t *testing.T) {
 		expected string
 	}{
 		{"", ""},
-		{"not-an-ip", "not-an-ip"},
+		{"not-an-ip", "invalid"},
+		{"1.2.3.4 - FAIL [01/Jan/2020:00:00:00 +0000]", "invalid"},
+		{"10.9.9.0/24", "invalid"},
 		{"192.168.1.100", "192.168.1.0"},
 		{"10.0.0.1", "10.0.0.0"},
 		{"::1", "::0"},
