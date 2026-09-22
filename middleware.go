@@ -1,7 +1,6 @@
 package echobasicauth
 
 import (
-	"net"
 	"slices"
 	"strings"
 	"time"
@@ -12,19 +11,6 @@ import (
 
 // ContextLoginKey is the key used to store the login after successful auth in the context
 const ContextLoginKey = "echo-basic-auth.login"
-
-// ClientIP resolves the client address, trusting forwarded headers only when echo.IPExtractor is set
-func ClientIP(c echo.Context) string {
-	if e := c.Echo(); e != nil && e.IPExtractor != nil {
-		return c.RealIP()
-	}
-	remoteAddr := c.Request().RemoteAddr
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		return remoteAddr
-	}
-	return host
-}
 
 // NewValidator returns a new BasicAuthValidator
 func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
@@ -40,8 +26,7 @@ func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 			if allowedIP {
 				wasIPAllowed = true
 			}
-			// Empty configured creds must never match, or a service that lost its password degrades to IP-only auth.
-			match := auth.Login != "" && auth.Password != "" && equals(auth.Login, login) && equals(auth.Password, password)
+			match := auth.Match(login, password)
 			if match {
 				wasAuthAllowed = true
 			}
@@ -74,5 +59,12 @@ func logAttempt(c echo.Context, ip string, wasIPAllowed, wasAuthAllowed bool) {
 
 // NewMiddleware returns a new BasicAuth middleware instance
 func NewMiddleware(auths ...*Auth) echo.MiddlewareFunc {
-	return middleware.BasicAuth(NewValidator(auths...))
+	v := NewValidator(auths...)
+	if v == nil {
+		return func(_ echo.HandlerFunc) echo.HandlerFunc {
+			return func(_ echo.Context) error { return echo.ErrUnauthorized }
+		}
+	}
+
+	return middleware.BasicAuth(v)
 }

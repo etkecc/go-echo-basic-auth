@@ -4,7 +4,18 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"golang.org/x/crypto/bcrypt"
 )
+
+func bcryptPassword(t *testing.T, raw string) string {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(raw), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("generating bcrypt hash for %q: %v", raw, err)
+	}
+	return string(hash)
+}
 
 func TestParseIPs(t *testing.T) {
 	auth0 := &Auth{IPs: []string{"192.168.1.1", "10.0.0.0/24"}}
@@ -152,6 +163,124 @@ func TestValidate(t *testing.T) {
 	if !strings.Contains(err.Error(), "10.0.0.0/33") || !strings.Contains(err.Error(), "10.0.0.1-10.0.0.9") {
 		t.Errorf("expected every invalid entry in the error, got %v", err)
 	}
+}
+
+func TestCompare(t *testing.T) {
+	hash := bcryptPassword(t, "pass")
+
+	tests := []struct {
+		name string
+		hash string
+		raw  string
+		want bool
+	}{
+		{"bcrypt matches", hash, "pass", true},
+		{"bcrypt rejects wrong password", hash, "nope", false},
+		{"plaintext matches", "plain", "plain", true},
+		{"plaintext rejects", "plain", "other", false},
+		{"invalid bcrypt falls back to plaintext", "$2a$10$not-a-valid-hash", "$2a$10$not-a-valid-hash", true},
+		{"hash is not its own password", hash, hash, false},
+	}
+
+	for _, test := range tests {
+		if got := (&Auth{}).compare(test.hash, test.raw); got != test.want {
+			t.Errorf("%s: compare(%q, %q) = %v, want %v", test.name, test.hash, test.raw, got, test.want)
+		}
+	}
+}
+
+func TestMatch(t *testing.T) {
+	tests := []struct {
+		name     string
+		auth     *Auth
+		login    string
+		password string
+		want     bool
+	}{
+		{"plaintext", &Auth{Login: "user", Password: "pass"}, "user", "pass", true},
+		{"bcrypt password", &Auth{Login: "user", Password: bcryptPassword(t, "pass")}, "user", "pass", true},
+		{"bcrypt login", &Auth{Login: bcryptPassword(t, "user"), Password: "pass"}, "user", "pass", true},
+		{"bcrypt both", &Auth{Login: bcryptPassword(t, "user"), Password: bcryptPassword(t, "pass")}, "user", "pass", true},
+		{"bcrypt rejects wrong password", &Auth{Login: "user", Password: bcryptPassword(t, "pass")}, "user", "nope", false},
+		{"empty presented login", &Auth{Login: "user", Password: "pass"}, "", "pass", false},
+		{"empty presented password", &Auth{Login: "user", Password: "pass"}, "user", "", false},
+		{"empty stored creds", &Auth{}, "user", "pass", false},
+	}
+
+	for _, test := range tests {
+		if got := test.auth.Match(test.login, test.password); got != test.want {
+			t.Errorf("%s: Match(%q, %q) = %v, want %v", test.name, test.login, test.password, got, test.want)
+		}
+	}
+}
+
+func TestAllowedIPNormalizesBothSides(t *testing.T) {
+	// stored plain IPs are canonicalized, so non-canonical entries match canonical peers
+	stored := &Auth{IPs: []string{"0:0:0:0:0:0:0:1", "2001:DB8::1"}}
+	if !stored.AllowedIP("::1") {
+		t.Error("expected expanded stored IPv6 to match canonical peer ::1")
+	}
+	if !stored.AllowedIP("2001:db8::1") {
+		t.Error("expected uppercase stored IPv6 to match lowercase canonical peer")
+	}
+
+	// the peer is canonicalized as well, so non-canonical peer input matches canonical entries
+	canonical := &Auth{IPs: []string{"::1", "2001:db8::1"}}
+	if !canonical.AllowedIP("0:0:0:0:0:0:0:1") {
+		t.Error("expected canonical stored IPv6 to match expanded peer input")
+	}
+	if !canonical.AllowedIP("2001:DB8::1") {
+		t.Error("expected canonical stored IPv6 to match uppercase peer input")
+	}
+
+	// unparseable peer input is denied, never matched
+	if canonical.AllowedIP("not-an-ip") {
+		t.Error("expected unparseable peer to be denied")
+	}
+}
+
+func TestSetIPs(t *testing.T) {
+	auth := &Auth{IPs: []string{"127.0.0.1"}}
+	if !auth.AllowedIP("127.0.0.1") {
+		t.Fatal("expected initially configured IP to be allowed")
+	}
+
+	auth.SetIPs([]string{"10.0.0.0/24"})
+	if auth.AllowedIP("127.0.0.1") {
+		t.Error("expected revoked IP to be denied after SetIPs")
+	}
+	if !auth.AllowedIP("10.0.0.7") {
+		t.Error("expected new CIDR range to be allowed after SetIPs")
+	}
+}
+
+func TestSetIPsConcurrent(_ *testing.T) {
+	// race detector regression: concurrent readers must tolerate SetIPs swaps of the allowlist
+	auth := &Auth{IPs: []string{"127.0.0.1"}}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				auth.AllowedIP("127.0.0.1")
+				auth.AllowedIP("10.0.0.5")
+			}
+		})
+	}
+	for i := range 100 {
+		if i%2 == 0 {
+			auth.SetIPs([]string{"10.0.0.1"})
+		} else {
+			auth.SetIPs([]string{"127.0.0.1"})
+		}
+	}
+	close(stop)
+	wg.Wait()
 }
 
 func TestAllowedIPConcurrent(_ *testing.T) {

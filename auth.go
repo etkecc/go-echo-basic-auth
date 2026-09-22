@@ -1,20 +1,23 @@
 package echobasicauth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"net"
 	"slices"
 	"sync"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Auth model
 type Auth struct {
 	Login    string   `json:"login" yaml:"login"` // Basic auth login
 	Password string   `json:"password" yaml:"password"`
-	IPs      []string `json:"ips" yaml:"ips"` // Allowed IPs and CIDRs
+	IPs      []string `json:"ips" yaml:"ips"` // Allowed IPs and CIDRs; use SetIPs for runtime changes
 
-	mu          sync.RWMutex // guards the parsed rules below
+	mu          sync.Mutex   // guards the parsed rules below
 	parsed      bool         // whether parsedIPs and parsedCIDRs match the current IPs field
 	parsedFrom  []string     // copy of the IPs field the parsed rules were built from
 	parsedIPs   []string     // parsed plain IPs from the IPs field, used by AllowedIP
@@ -31,32 +34,45 @@ func parseEntry(entry string) (*net.IPNet, net.IP) {
 
 // rules returns the parsed allowlist, rebuilt whenever the IPs field changed since the last call
 func (a *Auth) rules() ([]string, []*net.IPNet) {
-	a.mu.RLock()
-	current := a.parsed && slices.Equal(a.parsedFrom, a.IPs)
-	parsedIPs, parsedCIDRs := a.parsedIPs, a.parsedCIDRs
-	a.mu.RUnlock()
-	if current {
-		return parsedIPs, parsedCIDRs
-	}
-
-	parsedIPs = []string{}
-	parsedCIDRs = []*net.IPNet{}
-	for _, entry := range a.IPs {
-		ipnet, ip := parseEntry(entry)
-		if ipnet != nil {
-			parsedCIDRs = append(parsedCIDRs, ipnet)
-		} else if ip != nil {
-			parsedIPs = append(parsedIPs, entry)
-		}
-	}
-
 	a.mu.Lock()
-	a.parsed = true
-	a.parsedFrom = slices.Clone(a.IPs)
-	a.parsedIPs = parsedIPs
-	a.parsedCIDRs = parsedCIDRs
+	ips := slices.Clone(a.IPs)
+	current := a.parsed && slices.Equal(a.parsedFrom, ips)
+	parsedIPs, parsedCIDRs := a.parsedIPs, a.parsedCIDRs
+	if !current {
+		parsedIPs = []string{}
+		parsedCIDRs = []*net.IPNet{}
+		for _, entry := range ips {
+			ipnet, ip := parseEntry(entry)
+			if ipnet != nil {
+				parsedCIDRs = append(parsedCIDRs, ipnet)
+			} else if ip != nil {
+				parsedIPs = append(parsedIPs, ip.String())
+			}
+		}
+		a.parsed = true
+		a.parsedFrom = ips
+		a.parsedIPs = parsedIPs
+		a.parsedCIDRs = parsedCIDRs
+	}
 	a.mu.Unlock()
 	return parsedIPs, parsedCIDRs
+}
+
+// SetIPs atomically replaces the IP allowlist, safe for concurrent request processing
+func (a *Auth) SetIPs(ips []string) {
+	a.mu.Lock()
+	a.IPs = slices.Clone(ips)
+	a.mu.Unlock()
+}
+
+// compare hash/expected with raw/input, both bcrypted and plaintext.
+func (a *Auth) compare(hash, raw string) bool {
+	hashb := []byte(hash)
+	rawb := []byte(raw)
+	if _, err := bcrypt.Cost(hashb); err != nil {
+		return subtle.ConstantTimeCompare(hashb, rawb) == 1
+	}
+	return bcrypt.CompareHashAndPassword(hashb, rawb) == nil
 }
 
 // AllowedIP checks if the given IP is allowed by this Auth's IP rules
@@ -67,20 +83,27 @@ func (a *Auth) AllowedIP(ip string) bool {
 		return len(a.IPs) == 0
 	}
 
+	if parsed := net.ParseIP(ip); parsed != nil {
+		ip = parsed.String() // canonicalize peer so the plain-IP match is IP-equality
+	}
 	if len(parsedIPs) != 0 && slices.Contains(parsedIPs, ip) {
 		return true
 	}
-
 	if len(parsedCIDRs) != 0 {
-		parsed := net.ParseIP(ip)
 		for _, ipnet := range parsedCIDRs {
-			if ipnet.Contains(parsed) {
+			if ipnet.Contains(net.ParseIP(ip)) {
 				return true
 			}
 		}
 	}
 
 	return false
+}
+
+// Match checks if the given login and password match.
+func (a *Auth) Match(login, password string) bool {
+	notEmpty := login != "" && password != ""
+	return notEmpty && a.compare(a.Login, login) && a.compare(a.Password, password)
 }
 
 // Validate reports allowlist entries that are neither an IP nor a CIDR, so a typo fails the boot
