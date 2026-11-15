@@ -1,7 +1,13 @@
 # echo basic auth
 
-Basic Auth middleware with constant time equality checks and optional IP whitelisting for Echo framework.
+Basic Auth middleware with constant time equality checks and optional IP whitelisting for Echo v5.
 CIDRs are supported for IP whitelisting as well
+
+```go
+import echobasicauth "github.com/etkecc/go-echo-basic-auth/v2"
+```
+
+The v2 module targets Echo v5 (`github.com/labstack/echo/v5`); the v1 line stays on Echo v4.
 
 ## Usage
 
@@ -72,8 +78,13 @@ if err := auth.Validate(); err != nil {
 }
 ```
 
-Failed attempts are logged at WARN with the anonymized client address; Echo's default level is ERROR, so
-raise it to see them: `e.Logger.SetLevel(log.WARN)`.
+Failed attempts are logged at WARN with the anonymized client address through Echo's `*slog.Logger`;
+the default handler prints INFO and above, so they show up without configuration. Swap the logger to change
+the format or raise the threshold:
+
+```go
+e.Logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+```
 
 ### IP validation without credentials
 
@@ -84,5 +95,5 @@ if auth.AllowedIP(echobasicauth.ClientIP(c)) {
 }
 ```
 
-Use `ClientIP` instead of `c.RealIP()`: it ignores client headers unless `e.IPExtractor` is set, and it
-returns an empty string for unparseable addresses, which the allowlist denies.
+Use `ClientIP` when feeding the allowlist: it canonicalizes the address and returns an empty string for
+unparseable ones, which the allowlist denies.

@@ -1,12 +1,13 @@
 package echobasicauth
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
+	"github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v5/middleware"
 )
 
 // ContextLoginKey is the key used to store the login after successful auth in the context
@@ -18,7 +19,7 @@ func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 	if len(auths) == 0 {
 		return nil
 	}
-	return func(login, password string, c echo.Context) (bool, error) {
+	return func(c *echo.Context, login, password string) (bool, error) {
 		ip := ClientIP(c)
 		wasIPAllowed, wasAuthAllowed := false, false
 		for _, auth := range auths {
@@ -42,10 +43,10 @@ func NewValidator(auths ...*Auth) middleware.BasicAuthValidator {
 	}
 }
 
-// logAttempt logs a failed authentication attempt at WARN, visible once the app raises the logger level
-func logAttempt(c echo.Context, ip string, wasIPAllowed, wasAuthAllowed bool) {
+// logAttempt logs a failed authentication attempt at WARN
+func logAttempt(c *echo.Context, ip string, wasIPAllowed, wasAuthAllowed bool) {
 	requestPath := strings.ReplaceAll(strings.ReplaceAll(c.Request().URL.Path, "\n", ""), "\r", "")
-	c.Logger().Warnf(
+	c.Logger().Warn(fmt.Sprintf(
 		`%s - FAIL [%s] "%s %s %s" 401 0 "-" "Auth: false (ip: %t; creds: %t)"`,
 		anonymizeIP(ip),
 		time.Now().Format("2/Jan/2006:15:04:05 -0700"),
@@ -54,7 +55,7 @@ func logAttempt(c echo.Context, ip string, wasIPAllowed, wasAuthAllowed bool) {
 		c.Request().Proto,
 		wasIPAllowed,
 		wasAuthAllowed,
-	)
+	))
 }
 
 // NewMiddleware returns a new BasicAuth middleware instance
@@ -62,7 +63,7 @@ func NewMiddleware(auths ...*Auth) echo.MiddlewareFunc {
 	v := NewValidator(auths...)
 	if v == nil {
 		return func(_ echo.HandlerFunc) echo.HandlerFunc {
-			return func(_ echo.Context) error { return echo.ErrUnauthorized }
+			return func(_ *echo.Context) error { return echo.ErrUnauthorized }
 		}
 	}
 

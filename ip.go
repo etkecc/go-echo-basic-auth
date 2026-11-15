@@ -3,29 +3,15 @@ package echobasicauth
 import (
 	"net"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 // ClientIP resolves the client address, trusting forwarded headers only when echo.IPExtractor is set
-func ClientIP(c echo.Context) string {
-	ip := getClientIP(c)
-	if parsed := net.ParseIP(ip); parsed != nil {
+func ClientIP(c *echo.Context) string {
+	if parsed := net.ParseIP(c.RealIP()); parsed != nil {
 		return parsed.String() // canonicalize
 	}
 	return "" // invalid
-}
-
-// getClientIP from echo's IP extractor or from remote address
-func getClientIP(c echo.Context) string {
-	if e := c.Echo(); e != nil && e.IPExtractor != nil {
-		return c.RealIP()
-	}
-
-	host, _, err := net.SplitHostPort(c.Request().RemoteAddr)
-	if err != nil {
-		return c.Request().RemoteAddr
-	}
-	return host
 }
 
 // anonymizeIP drops the last octet of the IPv4 and IPv6 address to anonymize it

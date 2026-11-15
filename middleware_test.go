@@ -2,13 +2,13 @@ package echobasicauth
 
 import (
 	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/labstack/echo/v4"
-	gommonlog "github.com/labstack/gommon/log"
+	"github.com/labstack/echo/v5"
 )
 
 func TestNewValidatorNil(t *testing.T) {
@@ -35,7 +35,7 @@ func TestNewValidatorNilFiltering(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	if valid, _ := validator("user", "pass", c); !valid {
+	if valid, _ := validator(c, "user", "pass"); !valid {
 		t.Error("expected valid credentials to pass with nil-filtered auths")
 	}
 }
@@ -53,13 +53,13 @@ func TestNewValidatorMultipleAuths(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	if valid, _ := validator("admin", "admin123", c); !valid {
+	if valid, _ := validator(c, "admin", "admin123"); !valid {
 		t.Error("expected first auth to pass")
 	}
-	if valid, _ := validator("user", "user456", c); !valid {
+	if valid, _ := validator(c, "user", "user456"); !valid {
 		t.Error("expected second auth to pass")
 	}
-	if valid, _ := validator("admin", "user456", c); valid {
+	if valid, _ := validator(c, "admin", "user456"); valid {
 		t.Error("expected mismatched credentials to fail")
 	}
 }
@@ -73,10 +73,18 @@ func TestNewValidatorSetsContextLogin(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	_, _ = validator("myuser", "mypass", c)
+	_, _ = validator(c, "myuser", "mypass")
 	login, ok := c.Get(ContextLoginKey).(string)
 	if !ok || login != "myuser" {
 		t.Errorf("expected context login to be 'myuser', got %q", login)
+	}
+
+	failed := e.NewContext(req, httptest.NewRecorder())
+	if valid, _ := validator(failed, "myuser", "wrong"); valid {
+		t.Fatal("expected wrong password to fail")
+	}
+	if login := failed.Get(ContextLoginKey); login != nil {
+		t.Errorf("expected no context login after a failed attempt, got %v", login)
 	}
 }
 
@@ -105,19 +113,19 @@ func TestNewValidator(t *testing.T) {
 
 	// Valid credentials and IP
 	c.Request().RemoteAddr = "127.0.0.1:12345"
-	if valid, _ := validator("user1", "pass1", c); !valid {
+	if valid, _ := validator(c, "user1", "pass1"); !valid {
 		t.Error("Expected valid credentials to pass")
 	}
 
 	// Invalid IP
 	c.Request().RemoteAddr = "192.168.1.2:12345"
-	if valid, _ := validator("user1", "pass1", c); valid {
+	if valid, _ := validator(c, "user1", "pass1"); valid {
 		t.Error("Expected invalid IP to fail")
 	}
 
 	// Invalid credentials
 	c.Request().RemoteAddr = "127.0.0.1:12345"
-	if valid, _ := validator("user1", "wrongpass", c); valid {
+	if valid, _ := validator(c, "user1", "wrongpass"); valid {
 		t.Error("Expected invalid credentials to fail")
 	}
 }
@@ -134,10 +142,10 @@ func TestNewValidatorEmptyConfiguredCredsNeverMatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 
-	if valid, _ := validator("", "", c); valid {
+	if valid, _ := validator(c, "", ""); valid {
 		t.Error("empty configured creds matched empty presented creds")
 	}
-	if valid, _ := validator("anything", "anything", c); valid {
+	if valid, _ := validator(c, "anything", "anything"); valid {
 		t.Error("empty configured creds matched presented creds")
 	}
 }
@@ -157,17 +165,17 @@ func TestNewValidatorBcrypt(t *testing.T) {
 	c := e.NewContext(req, rec)
 
 	c.Request().RemoteAddr = "127.0.0.1:12345"
-	if valid, _ := validator("admin", "s3cr3t", c); !valid {
+	if valid, _ := validator(c, "admin", "s3cr3t"); !valid {
 		t.Error("expected bcrypt password to match from an allowed IP")
 	}
 
 	c.Request().RemoteAddr = "127.0.0.1:12345"
-	if valid, _ := validator("admin", "nope", c); valid {
+	if valid, _ := validator(c, "admin", "nope"); valid {
 		t.Error("expected wrong password to fail")
 	}
 
 	c.Request().RemoteAddr = "10.9.9.9:12345"
-	if valid, _ := validator("admin", "s3cr3t", c); valid {
+	if valid, _ := validator(c, "admin", "s3cr3t"); valid {
 		t.Error("expected disallowed IP to fail even with valid bcrypt creds")
 	}
 }
@@ -177,7 +185,7 @@ func TestNewValidatorRejectsForwardedHeaderSpoof(t *testing.T) {
 
 	e := echo.New()
 	e.Use(NewMiddleware(auth))
-	e.GET("/admin", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/admin", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
 	req.RemoteAddr = "127.0.0.1:1234"
@@ -215,7 +223,7 @@ func TestNewMiddlewareEmptyAuthsDenies(t *testing.T) {
 
 		e := echo.New()
 		e.Use(mw)
-		e.GET("/admin", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+		e.GET("/admin", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 		req := httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
 		req.SetBasicAuth("admin", "s3cr3t")
@@ -232,10 +240,9 @@ func TestLogAttemptVisibleAtWarnLevel(t *testing.T) {
 
 	e := echo.New()
 	sink := &bytes.Buffer{}
-	e.Logger.SetOutput(sink)
-	e.Logger.SetLevel(gommonlog.WARN)
+	e.Logger = slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	e.Use(NewMiddleware(auth))
-	e.GET("/admin", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/admin", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
 	req.RemoteAddr = "203.0.113.7:1234"
@@ -245,6 +252,12 @@ func TestLogAttemptVisibleAtWarnLevel(t *testing.T) {
 	if !strings.Contains(sink.String(), "FAIL") {
 		t.Errorf("expected failed attempt to be logged at WARN level, got %q", sink.String())
 	}
+	if !strings.Contains(sink.String(), "203.0.113.0") {
+		t.Errorf("expected the anonymized peer in the log, got %q", sink.String())
+	}
+	if strings.Contains(sink.String(), "203.0.113.7") {
+		t.Errorf("expected the full peer address to be anonymized, got %q", sink.String())
+	}
 }
 
 func TestLogAttemptDropsUnparsedPeerInput(t *testing.T) {
@@ -252,10 +265,9 @@ func TestLogAttemptDropsUnparsedPeerInput(t *testing.T) {
 
 	e := echo.New()
 	sink := &bytes.Buffer{}
-	e.Logger.SetOutput(sink)
-	e.Logger.SetLevel(gommonlog.WARN)
+	e.Logger = slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	e.Use(NewMiddleware(auth))
-	e.GET("/admin", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+	e.GET("/admin", func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/admin", http.NoBody)
 	req.RemoteAddr = "1.2.3.4 - FAIL [01/Jan/2020:00:00:00 +0000]"

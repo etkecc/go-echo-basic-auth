@@ -5,14 +5,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 func TestClientIP(t *testing.T) {
 	newEcho := func(extractor echo.IPExtractor) *echo.Echo {
 		e := echo.New()
 		e.IPExtractor = extractor
-		e.GET("/", func(c echo.Context) error { return c.String(http.StatusOK, ClientIP(c)) })
+		e.GET("/", func(c *echo.Context) error { return c.String(http.StatusOK, ClientIP(c)) })
 		return e
 	}
 
@@ -41,14 +41,13 @@ func TestClientIP(t *testing.T) {
 }
 
 func TestClientIPCanonicalizesIP(t *testing.T) {
-	// non-canonical (uppercase) IPv6 coming from the extractor is normalized to canonical form
+	// a non-canonical (uppercase) IPv6 from a custom extractor is normalized to canonical form
 	e := echo.New()
-	e.IPExtractor = echo.ExtractIPFromXFFHeader()
-	e.GET("/", func(c echo.Context) error { return c.String(http.StatusOK, ClientIP(c)) })
+	e.IPExtractor = func(*http.Request) string { return "2001:DB8::1" }
+	e.GET("/", func(c *echo.Context) error { return c.String(http.StatusOK, ClientIP(c)) })
 
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "127.0.0.1:1234"
-	req.Header.Set(echo.HeaderXForwardedFor, "2001:DB8::1")
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 	if got := rec.Body.String(); got != "2001:db8::1" {
@@ -59,7 +58,7 @@ func TestClientIPCanonicalizesIP(t *testing.T) {
 func TestClientIPRejectsNonIP(t *testing.T) {
 	// without an extractor, an unparseable remote address resolves to an empty IP so the allowlist denies it
 	e := echo.New()
-	e.GET("/", func(c echo.Context) error { return c.String(http.StatusOK, ClientIP(c)) })
+	e.GET("/", func(c *echo.Context) error { return c.String(http.StatusOK, ClientIP(c)) })
 	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
 	req.RemoteAddr = "evil.com:1234"
 	rec := httptest.NewRecorder()
